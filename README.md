@@ -23,7 +23,7 @@ uv sync
     - Generate an API key from your account settings
     - Set your chute api env var:
 ```
-    CHUTES_API_KEY=your_chutes_api_key
+CHUTES_API_KEY=your_chutes_api_key
 ```
 
 ## 5. Set your Cloudflare R2
@@ -33,10 +33,10 @@ uv sync
    - Generate API tokens with read/write permissions
    - Set your R2 env vars:
 ```
-    Cloudflare R2 Configuration
-    R2_ACCESS_KEY_ID=your_r2_access_key
-    R2_SECRET_ACCESS_KEY=your_r2_secret_key
-    R2_ENDPOINT_URL=your_r2_endpoint_url
+Cloudflare R2 Configuration
+R2_ACCESS_KEY_ID=your_r2_access_key
+R2_SECRET_ACCESS_KEY=your_r2_secret_key
+R2_ENDPOINT_URL=your_r2_endpoint_url
 ```
 
 ## 6. Run your miner or validator
