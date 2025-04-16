@@ -41,14 +41,14 @@ uv sync
 
 ## 6. Run your miner or validator
 ```
-    # Validator + Miner
-    python3 run.py 
+# Validator + Miner
+python3 run.py 
 
-    # Only Validator
-    python3 run.py --no_miner
+# Only Validator
+python3 run.py --no_miner
 
-    # Only Miner
-    python3 run.py --no_validator
+# Only Miner
+python3 run.py --no_validator
 ```
 
 ```
