@@ -6,6 +6,9 @@ __pycache__/
 # C extensions
 *.so
 
+# Results directory
+results/
+
 # Distribution / packaging
 dist/
 build/
