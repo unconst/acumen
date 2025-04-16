@@ -14,5 +14,6 @@ dependencies = [
     "aiobotocore",
     "ipykernel",
     "torch",
-    "bittensor-cli"
+    "bittensor-cli",
+    "datasets"
 ]

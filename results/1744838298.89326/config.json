@@ -1,0 +1,8 @@
+{
+    "n": 10,
+    "k": 20,
+    "seed": "42",
+    "dataset": "aime",
+    "reasoning_model": "unsloth/gemma-3-4b-it",
+    "validation_model": "unsloth/gemma-3-4b-it"
+}

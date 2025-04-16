@@ -33,8 +33,8 @@ Reasoning Steps:
 {steps}
 ```
 
-ONLY output True or False based on whether the entire reasoning train is logically sound from start to finish.
-ONLY output True or False
+ONLY output True if the entire reasoning thread is logically sound from start to finish.
+output False AND the reason for the failure if the reasoning is not logically sound from start to finish
 """
 
 REASONING_SPLITTER = """
