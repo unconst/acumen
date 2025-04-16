@@ -70,7 +70,7 @@ async def reward_validity( task: Dict, solution: Dict ) -> float:
         "Check if the SOLUTION is correct given the GROUND_TRUTH and the TASK"
         f"TASK: {task['row']['problem']}"
         f"SOLUTION: {solution['solution']}"
-        f"ANSWER: {task['row']['problem']}"
+        f"ANSWER: {task['row']['solution']}"
         "Answer only True or False nothing else"
     )
     answer = await llm.prompt( prompt, model = "unsloth/gemma-3-4b-it" )
