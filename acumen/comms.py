@@ -14,13 +14,15 @@
 # THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
 # OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 # DEALINGS IN THE SOFTWARE.
-
+from __future__ import annotations
 import os
 import json
 import asyncio
 import botocore
-from typing import List, Dict
+import json, gzip, importlib
+from pydantic import BaseModel
 from dotenv import load_dotenv
+from typing import Any, Dict, List, Union
 from aiobotocore.session import get_session
 
 load_dotenv(override=True)
@@ -89,6 +91,49 @@ def load_r2_write_secret_access_key():
     except Exception as e:
         return None
 
+_JSON_OPTS = dict(ensure_ascii=False, separators=(",", ":"))  # compact
+
+# ---------- encode ---------- #
+def _encode_item(item: Union[dict, BaseModel]) -> Dict[str, Any]:
+    if isinstance(item, BaseModel):
+        return {
+            "__kind__": "pydantic",
+            "module": item.__class__.__module__,
+            "cls": item.__class__.__name__,
+            "data": item.model_dump()  # Pydantic v2; use .dict() on v1
+        }
+    if isinstance(item, dict):
+        return {"__kind__": "dict", "data": item}
+    raise TypeError(f"Unsupported item type: {type(item)}")
+
+def encode(data: List[Union[dict, BaseModel]]) -> bytes:
+    """Return gz‑compressed UTF‑8 JSON bytes ready for S3."""
+    json_str = json.dumps([_encode_item(it) for it in data], **_JSON_OPTS)
+    return gzip.compress(json_str.encode("utf‑8"))
+
+# ---------- decode ---------- #
+def _safe_import(module: str, cls_name: str):
+    mod = importlib.import_module(module)
+    cls = getattr(mod, cls_name, None)
+    if cls is None:
+        raise ImportError(f"{cls_name} not found in {module}")
+    return cls
+
+def _decode_item(obj: Dict[str, Any]) -> Union[dict, BaseModel]:
+    kind = obj.get("__kind__")
+    if kind == "dict":
+        return obj["data"]
+    if kind == "pydantic":
+        cls = _safe_import(obj["module"], obj["cls"])
+        return cls(**obj["data"])
+    raise ValueError(f"Unknown kind marker: {kind}")
+
+def decode(blob: bytes) -> List[Union[dict, BaseModel]]:
+    """Turn gz‑compressed JSON bytes back into original objects."""
+    raw = gzip.decompress(blob).decode("utf‑8")
+    parsed = json.loads(raw)
+    return [_decode_item(it) for it in parsed]
+
 # R2 configuration details.
 CLIENT_CONFIG = botocore.config.Config(max_pool_connections=256)
 session = get_session()
@@ -150,24 +195,17 @@ async def download(bucket:str, filename: str) -> Dict:
             async with response['Body'] as stream:
                 data_bytes = await stream.read()
             try:
-                data = json.loads(data_bytes.decode("utf-8"))
+                data = decode( data_bytes )
             except json.JSONDecodeError as e:
-                return None
-            try:
-                with open(local_path, "w") as f:
-                    json.dump(data, f, indent=2)
-            except Exception as e:
                 return None
         return data
     except Exception as e:
         return None
 
 # Uploads the data dictionary as a JSON file to the bucket as filename <window>-<name>.json
-async def upload( bucket:str, filename: str, data: dict ) -> None:
-    try:
-        json_bytes = json.dumps(data, indent=2).encode("utf-8")
-    except Exception as e:
-        return
+async def upload( bucket:str, filename: str, data: List[Union[dict, BaseModel]] ) -> None:
+    
+    data_bytes = encode( data )
 
     try:
         endpoint_url = load_r2_endpoint_url()
@@ -187,7 +225,7 @@ async def upload( bucket:str, filename: str, data: dict ) -> None:
             await s3_client.put_object(
                 Bucket=bucket,
                 Key=filename,
-                Body=json_bytes
+                Body=data_bytes
             )
     except Exception as e:
         return

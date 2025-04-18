@@ -16,19 +16,18 @@
 # DEALINGS IN THE SOFTWARE.
 
 import re
-import llm
+import json
 import sys
-import data
 import time
-import comms
 import torch
 import asyncio
 import datetime
 import argparse
 import traceback
+import acumen as ac
 import bittensor as bt
-from rich.console import Console
 from async_lru import alru_cache
+from rich.console import Console
 from typing import List, Dict, Tuple, Optional, Union
 
 def grpo_scores(rewards: torch.Tensor) -> torch.Tensor:
@@ -50,66 +49,6 @@ def grpo_scores(rewards: torch.Tensor) -> torch.Tensor:
     scores = scores + dominates.sum(dim=0) # Change dim=1 to dim=0 since rewards is 1D
     return scores
 
-async def check_format( solution: Dict ) -> float:
-    """
-    Checks if the provided solution adheres to the deepseek style formatting.
-    Accepts solutions that contain <think> and </think> tags followed by a formatted answer.
-    The answer does not need to be in <answer> tags.
-    """
-    pattern = r"^\s*(?:<think>.*?</think>\s*)+.*$"
-    formatted = float(bool(re.fullmatch(pattern, solution['solution'], flags=re.DOTALL)))
-    if not formatted:
-        pass
-    return formatted
-
-async def reward_validity( task: Dict, solution: Dict ) -> float:
-    """
-    Checks to see if the solution matches the ground truth.
-    """
-    prompt = (
-        "Check if the SOLUTION is correct given the GROUND_TRUTH and the TASK"
-        f"TASK: {task['row']['problem']}"
-        f"SOLUTION: {solution['solution']}"
-        f"ANSWER: {task['row']['solution']}"
-        "Answer only True or False nothing else"
-    )
-    answer = await llm.prompt( prompt, model = "unsloth/gemma-3-4b-it" )
-    return bool( answer )
-
-async def reward_reasonsing( solution: Dict ) -> bool:
-    """
-    Checks to see if the reasoning done by the model to produce the outcome is logically consistent.
-    """
-    prompt_text = (
-        "You are an expert logical reasoning auditor. Your task is to examine a chain-of-thought "
-        "and determine whether the reasoning presented is genuinely derived from first principles "
-        "and builds step by step to the final answer. In particular, evaluate the following criteria:\n\n"
-        "1. **Incremental Derivation:** Does each step follow naturally from the previous one, "
-        "leading toward the final answer?\n\n"
-        "2. **Absence of Pre-Injection:** Is there any indication that the final answer was provided early "
-        "in the reasoning or that the subsequent steps are merely a post-hoc justification?\n\n"
-        "3. **Logical Consistency:** Are all steps coherent, and do they employ valid logical or mathematical "
-        "principles toward deriving the answer?\n\n"
-        "Below is the chain-of-thought reasoning along with the final answer. After your evaluation, "
-        "please provide *only one word* as your final response: 'true' if the reasoning is logically consistent "
-        "and genuinely derived from first principles, or 'false' if it is not.\n\n"
-        "Chain-of-Thought Reasoning:\n"
-        f"{solution['solution']}"
-        "Please analyze the entire reasoning process carefully. "
-        "Do not include any additional commentary—only output one word: 'true' or 'false'."
-    )
-    completion = await llm.prompt(prompt=prompt_text, model = "unsloth/gemma-3-4b-it")
-    return float( bool( completion.strip().lower() ) )
-
-def pprompt(text:str, n:int=80) -> str:
-    # Replace newlines and ensure total length doesn't exceed n
-    text = text.replace('\n', ' ')
-    if len(text) <= n:
-        return f"[blue]{text}[/blue]"
-    else:
-        half = (n-3)//2
-        return f"[blue]{text[:half]} ... {text[-half:]}[/blue]"   
-
 class Acumen:
 
     @staticmethod
@@ -120,7 +59,7 @@ class Acumen:
         parser = argparse.ArgumentParser(description='Acumen')
         parser.add_argument('--netuid', type=int, default=10)
         parser.add_argument('--dataset', type=str, default="AI-MO/NuminaMath-TIR")
-        parser.add_argument('--bucket', type=str, default=comms.bucket())
+        parser.add_argument('--bucket', type=str, default=ac.comms.bucket())
         parser.add_argument('--window_len', type=int, default=3)
         parser.add_argument('--sample_size', type=int, default=1)
         parser.add_argument('--no_miner', action='store_true', help='Turn off mining')
@@ -138,6 +77,7 @@ class Acumen:
         self.console.print(f"\n[bold white]Acumen[/bold white]:\n\n{self.config}")
         self.wallet = bt.wallet(config=self.config)
         self.subtensor = bt.async_subtensor(config=self.config)
+        self.task = ac.tasks.MathTask()
 
     async def initialize(self):
         """
@@ -205,153 +145,73 @@ class Acumen:
         commitments = await self.subtensor.get_all_commitments(netuid=self.config.netuid, block=window * self.config.window_len)
         buckets = {k: v for k, v in commitments.items() if isinstance(v, str) and len(v) == 32 and v.isalnum()}
         return buckets
-     
     
-    async def mine(self, window:int):
-        """
-        Solves tasks for window and uploads them to R2.
-        Args - window (int): The window to attain tasks for.
-        """
-        self.console.print(f"\n[bold white]Mining[/bold white] (window={window})", style='yellow')             
+    async def generate(self, window: int):
+        self.console.print(f"\n[bold white]Generating Tasks[/bold white] (window={window})", style='tan')             
         try:
-            # Get the rng seed and task list for this window.
-            seed = await self.rng_seed(window)
-            tasks = await data.get_samples(self.config.dataset, seed=seed, sample_size=self.config.sample_size)
-            
-            # Function for solving the task using deepseek.
-            # NOTE: miners should implement as you see fit.
-            async def solve_task_i(i, task):
-                prob = task['row']['problem']
-                self.console.print(f"\t>> [light green]Solving[/light green] task=({i+1}|{self.config.sample_size}): {pprompt(prob)}", end="\n", style='green')                
-                sol_i = await llm.prompt(prompt=prob)#, model="deepseek-ai/DeepSeek-R1")
-                signature = self.wallet.hotkey.sign(data=f"{self.wallet.hotkey.ss58_address}{prob}").hex()
-                self.console.print(f"\t\t>> [light green]Done[/light green] task=({i+1}|{self.config.sample_size}): {pprompt(sol_i)}", end="\n", style='green')
-                return {
-                    'idx': i,
-                    'row_idx': task['row_idx'],
-                    'window': window,
-                    'dataset': self.config.dataset,
-                    'solution': sol_i,
-                    'hotkey': self.wallet.hotkey.ss58_address,
-                    'signature': signature
-                }
-            # Gather solutions.
-            solutions = await asyncio.gather(*[solve_task_i(i, task) for i, task in enumerate(tasks)])
-            
-            # Upload solutions to my bucket for this window.
-            filename = f"{self.wallet.hotkey.ss58_address}-solutions-{window}.json"
-            await comms.upload(bucket=self.bucket, filename=filename, data=solutions)
-            self.console.print(f"\t>> [light green]Uploaded[/light green] {len(tasks)} solutions for window={window}", style='tan')
+            tasks = []
+            for _ in range(self.config.sample_size):
+                task_i = await self.task.generate( self.wallet )
+                tasks.append( task_i)
+                self.console.print(f"\n\t >> task:{task_i}", style='tan') 
+            filename = f"{self.wallet.hotkey.ss58_address}-tasks-{window}.json"
+            await ac.comms.upload(bucket=self.bucket, filename=filename, data=tasks)
 
         except Exception as e:
-            self.console.print(f"\t>> ERROR during solve: {str(e)}\n{traceback.format_exc()}", style='red')
+            self.console.print(f"\t>> ERROR during generation: {str(e)}\n{traceback.format_exc()}", style='red')
             
-            
-    async def validate(self, window: int):
-        """
-        Validate solutions from all miners at window.
-        Args - window (int): The window to reward solutions.
-        """
-        self.console.print(f"\n[bold white]Validating[/bold white] (window={window})", style='yellow')             
+    async def solve(self, window: int):
+        self.console.print(f"\n[bold white]Solving Tasks[/bold white] (window={window})", style='yellow')             
         try:
-            # Get the rng seed, buckets and tasks for window.
-            seed = await self.rng_seed(window)
             buckets = await self.get_buckets(window)
-            tasks = await data.get_samples(self.config.dataset, seed=seed, sample_size=self.config.sample_size)
-            
-            # Iterate over each hotkey and get their solutions for this window.
-            n_rewards = 0
-            reward_info = [{} for _ in tasks]
             for hotkey_i, bucket_i in buckets.items():
-                uid = self.metagraph.hotkeys.index(hotkey_i)
-                # Download the solutions for this hotkey at this window.                
-                fname:str = f"{hotkey_i}-solutions-{window}.json"
-                if not await comms.exists(bucket=bucket_i, filename=fname): 
-                    self.console.print(f"\t>> [light red]Validating[/light red] uid={uid} has no solutions for window={window}", end="\n", style='tan')
+                fname:str = f"{hotkey_i}-tasks-{window}.json"
+                if not await ac.comms.exists(bucket=bucket_i, filename=fname): 
                     continue
-                solutions_i = await comms.download(bucket=bucket_i, filename=fname)
-                n_sols = len(solutions_i)
-                self.console.print(f"\t>> [light green]Validating[/light green] uid={uid} with {n_sols} solutions", end="\n", style='tan')
-                # Iterate over solutions, check their signature and reward them.
-                for sol_j in solutions_i:
-                    idx = int(sol_j['idx'])
-                    task_j = tasks[idx]
-                    self.console.print(f"\t\t>> [light green]Validating[/light green] uid={uid} solution=({idx}|{n_sols}) : {pprompt(sol_j['solution'])}", end="\n", style='tan')
-                    if not bt.Keypair(sol_j['hotkey']).verify(f"{hotkey_i}{task_j['row']['problem']}", bytes.fromhex(sol_j['signature'])):
-                        self.console.print(f"Signature mismatch.", style='bold red')
-                        continue
-                    format: float = await check_format(sol_j)
-                    validity: float = await reward_validity(task_j, sol_j)
-                    reasoning: float = await reward_reasonsing(sol_j)
-                    final: float = 1 + format * validity * reasoning
-                    rewards = {'format': format, 'validity': validity, 'reasoning': reasoning, 'final': final }                    
-                    self.console.print(f"\t\t\t>> [light green]Validated[/light green] uid={uid} solution=({idx}|{n_sols}) rewards={str(rewards)}", end="\n", style='tan')
-                    reward_info[idx][hotkey_i] = rewards
-                    n_rewards += 1
-            # Optionally upload the rewards to my R2 bucket.                
-            if n_rewards > 0:
-                await comms.upload(
-                    bucket=self.bucket,
-                    filename=f"{self.wallet.hotkey.ss58_address}-rewards-{window}.json",
-                    data=reward_info,
-                )
-                self.console.print(f"\t>> [light green]Uploaded[/light green] {len(reward_info)} rewards for window={window}", style='tan')
-            else:
-                self.console.print(f"\t>> [light red]No[/light red] rewards for window: {window}", style='tan')
-
+                tasks = await ac.comms.download(bucket=bucket_i, filename=fname) 
+                solutions = []
+                for _, task in enumerate(tasks):
+                    solution_i = await self.task.solve( self.wallet, task ) 
+                    solutions.append( solution_i )
+                    self.console.print(f"\n\t >> solution={solution_i}", style='tan')             
+                # Upload solutions.
+                filename = f"{self.wallet.hotkey.ss58_address}-{hotkey_i}-solutions-{window}.json"
+                await ac.comms.upload(bucket=self.bucket, filename=filename, data=solutions)
         except Exception as e:
-            self.console.print(f"ERROR during reward evaluation: {str(e)}\n{traceback.format_exc()}", style='bold red')
+            self.console.print(f"\t>> ERROR during generation: {str(e)}\n{traceback.format_exc()}", style='red')
             
-
-    async def weight(self, window:int ):
-        """
-        Sets weights for rewards from this window.
-        Args - window (int): The window to attain weights for.
-        """
-        self.console.print(f"\n[bold white]Weighting[/bold white] (window={window})", style='yellow')  
-        if self.weights is None:
-            self.weights = torch.zeros( len(self.metagraph.hotkeys) )
-        self.console.print(f"\t>> [light green]Weights[/light green]={list(sorted(self.weights.tolist(), reverse=True))[:10]}", style='tan')
-        self.console.print(f"\t>> [light green]Uids[/light green]={[i for _, i in sorted(zip(self.weights.tolist(), range(len(self.weights))), reverse=True)][:10]}", style='tan')
+    async def reward(self, window: int):
+        self.console.print(f"\n[bold white]Rewarding Tasks[/bold white] (window={window})", style='yellow')             
         try:
-            # Returns the weights for window.
-            async def get_grpo_scores_for_window( window: int ) -> List[float]:
-                # Check if there is reward info for this window.
-                scores = torch.zeros( self.metagraph.n )
-                fname = f"{self.wallet.hotkey.ss58_address}-rewards-{window}.json"
-                if not await comms.exists(bucket=self.bucket, filename=fname):
-                    self.console.print(f"\t>> [light red]Empty[/light red] rewards for window={window}", style='tan')
-                    return scores
-                # Download the reward info.
-                reward_info: List[Dict] = await comms.download(bucket=self.bucket,filename=fname)
-                if len(reward_info) == 0:
-                    self.console.print(f"\t>> [light red]No[/light red] rewards for window={window}", style='tan')
-                    return scores
-                
-                # Iterate across reward info and add GRPO scores.
-                for i, results in enumerate(reward_info):
-                    rewards = torch.tensor( [ r['final'] for r in list(results.values()) ], dtype = torch.float32)
-                    rewards = grpo_scores(rewards)
-                    for hotkey, reward in zip(results.keys(), rewards):
-                        idx = self.metagraph.hotkeys.index(hotkey)
-                        scores[idx] += reward
-                self.console.print(f"\t>> [light green]Generated[/light green] weights for window={window}", style='tan')
-                return scores
-
-            # GRPO the weights and set them on chain for the window
-            scores: torch.FloatTensor = await get_grpo_scores_for_window( window )
-            scores: torch.FloatTensor = scores / (torch.sum(scores) + 1e-8)  # Add small epsilon to avoid division by zero
-            self.weights: torch.FloatTensor = 0.01 * scores + (1-0.01) * self.weights.clone().detach()
-            await self.subtensor.set_weights(
-                wallet=self.wallet,
-                netuid=self.config.netuid,
-                uids=self.metagraph.uids,
-                weights=self.weights.tolist(),
-                wait_for_inclusion=False
-            )
+            buckets = await self.get_buckets(window)
+            tasks_fname:str = f"{self.wallet.hotkey.ss58_address}-tasks-{window}.json"
+            # Check if tasks exist for this window.
+            if not await ac.comms.exists(bucket=self.bucket, filename=tasks_fname): 
+                return
+            # Get the tasks I uploaded.
+            tasks = await ac.comms.download(bucket=self.bucket, filename=tasks_fname) 
+            self.console.print(f"\n\t >> loaded: tasks={len(tasks)}, window={window}", style='tan')             
+            # Got through all buckets and finc someone who solved my tasks.
+            for hotkey_i, bucket_i in buckets.items():
+                # Check if this hotkey solved these tasks.
+                solution_fname:str = f"{hotkey_i}-{self.wallet.hotkey.ss58_address}-solutions-{window}.json"
+                if not await ac.comms.exists(bucket=self.bucket, filename=solution_fname): 
+                    continue
+                # Get the uploaded solutions.
+                solutions = await ac.comms.download(bucket=bucket_i, filename=solution_fname) 
+                # Reward solutions given tasks.
+                rewards = []
+                for task, sol in list(zip(tasks, solutions)):
+                    rewards_i = await self.task.reward( self.wallet, task, sol )
+                    rewards.append( rewards_i )
+                    self.console.print(f"\n\t\t >> reward={rewards_i}", style='tan')             
+                # Upload rewards.
+                rewards_fname = f"{self.wallet.hotkey.ss58_address}-{hotkey_i}-rewards-{window}.json"
+                await ac.comms.upload(bucket=self.bucket, filename=rewards_fname, data=rewards)
+                self.console.print(f"\n\t >> uploaded: rewards={len(rewards)}, window={window}", style='tan')             
         except Exception as e:
-            self.console.print(f"\t>> ERROR during weight setting: {str(e)}\n{traceback.format_exc()}", style='bold red')
-
+            self.console.print(f"\t>> ERROR during generation: {str(e)}\n{traceback.format_exc()}", style='red')
+    
     async def run(self):
         """
         Main runner loop.
@@ -361,9 +221,9 @@ class Acumen:
             # Load current window and get latest metagraph.
             current_window = await self.window()
             self.metagraph = await self.subtensor.metagraph(self.config.netuid)
-            await self.mine(current_window)
-            await self.validate(current_window - 1)
-            await self.weight(current_window - 2)
+            await self.generate(current_window)
+            await self.solve(current_window - 1)
+            await self.reward(current_window - 2)
             # Wait for window to end.
             while await self.window() == current_window:
                 time.sleep(2)
