@@ -9,6 +9,7 @@ __pycache__/
 # Results directory
 results/
 old/
+*.ipynb
 
 # Distribution / packaging
 dist/

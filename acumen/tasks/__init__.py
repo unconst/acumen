@@ -16,5 +16,6 @@
 # DEALINGS IN THE SOFTWARE.
 
 from .math import MathTask
+from .commits import CommitsTask
 from .base import Task, Solution, Rewards
-__all__ = ['MathTask', 'Task', 'Solution', 'Rewards'] 
+__all__ = ['MathTask', 'CommitsTask', 'Task', 'Solution', 'Rewards'] 

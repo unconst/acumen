@@ -21,4 +21,7 @@ from . import comms
 from . import rewards
 from . import tasks
 
+from rich.console import Console
+console = Console()
+
 __all__ = ['data', 'llm', 'comms', 'rewards', 'tasks'] 

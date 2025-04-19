@@ -175,10 +175,7 @@ def safe_json_loads(raw: str) -> Optional[Any]:
         print (text_fixed, e)
         return None 
     
-async def reason( solution: str ) -> float:
-    start = solution.find('<think>') + len('<think>')
-    end = solution.find('</think>')
-    reasoning = solution[start:end]    
+async def sound_reasoning( reasoning: str ) -> float:
     parse_prompt = GEN_PROMPT.format(reasoning = reasoning)    
     steps_output = await ac.llm.prompt( parse_prompt, model = "unsloth/Mistral-Nemo-Instruct-2407")
     steps_json = safe_json_loads(steps_output)
